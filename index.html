@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProofVault</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#e8efed; --ink:#14282b; --card:#fff; --stamp:#1d4e89; --ok:#1f7a4d; --bad:#b3261e; --muted:#587076; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0f1c1e; --ink:#e4eeed; --card:#192b2e; --stamp:#5b9be0; --ok:#4cc38a; --bad:#f0746b; --muted:#93acb0; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 Archivo,system-ui,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:32px 20px 64px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-weight:800; font-size:clamp(2rem,7vw,3.2rem); line-height:1; margin:0; }
+  h2 { font-weight:800; font-size:1.25rem; margin:0 0 12px; }
+  .lead { color:var(--muted); max-width:58ch; margin:12px 0 28px; }
+  button { font:500 1rem Archivo,sans-serif; border:0; border-radius:8px; padding:10px 18px; background:var(--stamp); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.small { padding:6px 12px; background:transparent; color:var(--bad); border:2px solid var(--bad); }
+  :is(button,input):focus-visible, label:focus-within { outline:3px solid var(--ok); outline-offset:2px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:700px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border-radius:12px; padding:20px; border-top:6px solid var(--stamp); }
+  .card.verify { border-top-color:var(--ok); }
+  .drop { display:block; border:2px dashed var(--muted); border-radius:10px; padding:22px 14px; text-align:center; cursor:pointer; color:var(--muted); overflow-wrap:anywhere; }
+  .drop input { position:absolute; opacity:0; width:1px; height:1px; }
+  .hash { font:.8rem/1.4 "IBM Plex Mono",monospace; color:var(--muted); overflow-wrap:anywhere; margin:10px 0; min-height:1.2em; }
+  input[type=text] { width:100%; padding:10px 12px; border:2px solid var(--ink); border-radius:8px; font:inherit; background:var(--card); color:var(--ink); margin-bottom:10px; }
+  .result { margin-top:12px; padding:12px 14px; border-radius:8px; border-left:6px solid var(--muted); }
+  .result.ok { border-left-color:var(--ok); } .result.bad { border-left-color:var(--bad); }
+  .result strong { display:block; font-size:1.1rem; }
+  #status { color:var(--muted); font-size:.9rem; min-height:1.4em; margin:14px 0 0; }
+  #status.error { color:var(--bad); }
+  .rec { background:var(--card); border-radius:10px; padding:14px 16px; margin-bottom:10px; display:flex; justify-content:space-between; gap:12px; align-items:center; }
+  .rec .t { font-weight:800; overflow-wrap:anywhere; }
+  .rec small { color:var(--muted); }
+  .badge { color:var(--bad); font-weight:800; }
+  .empty { color:var(--muted); }
+  h2.sec { margin-top:36px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ProofVault</h1>
+    <button id="connectBtn">Connect wallet</button>
+  </header>
+  <p class="lead">Prove a document existed, unchanged, at a specific time. Your file never leaves your browser: only its SHA-256 fingerprint is recorded on the Sepolia blockchain.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Register a document</h2>
+      <label class="drop"><input type="file" id="regFile"><span id="regName">Choose a file to register</span></label>
+      <div class="hash" id="regHash"></div>
+      <input type="text" id="title" maxlength="100" placeholder="Title (optional)" aria-label="Title">
+      <button id="regBtn" disabled>Register on blockchain</button>
+    </section>
+    <section class="card verify">
+      <h2>Verify a document</h2>
+      <label class="drop"><input type="file" id="verFile"><span id="verName">Choose a file to check</span></label>
+      <div class="hash" id="verHash"></div>
+      <div id="verResult"></div>
+    </section>
+  </div>
+  <div id="status" role="status"></div>
+
+  <h2 class="sec">Your records</h2>
+  <div id="list"><p class="empty">Connect your wallet to see documents you registered.</p></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+<script>
+  // >>> Replace with your deployed contract address <<<
+  const CONTRACT_ADDRESS = "0xYourContractAddressHere";
+  const SEPOLIA_CHAIN_ID = "0xaa36a7";
+  const RPC = "https://ethereum-sepolia-rpc.publicnode.com"; // read-only, so verifying needs no wallet
+  const ABI = [
+    "function register(bytes32 hash, string title)",
+    "function revoke(bytes32 hash)",
+    "function verify(bytes32 hash) view returns (bool exists, address owner, uint64 timestamp, string title, bool revoked)",
+    "function getRecordsOf(address user) view returns (tuple(bytes32 hash, address owner, uint64 timestamp, string title, bool revoked)[])"
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const short = (a) => a.slice(0, 6) + "..." + a.slice(-4);
+  const when = (s) => new Date(Number(s) * 1000).toLocaleString();
+  let reader = new ethers.Contract(CONTRACT_ADDRESS, ABI, new ethers.JsonRpcProvider(RPC, 11155111, { staticNetwork: true }));
+  let writer = null, account = "", regHash = "", regFileName = "";
+
+  function setStatus(t, err = false) { $("status").textContent = t; $("status").className = err ? "error" : ""; }
+
+  async function sha256(file) {
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()));
+    return "0x" + [...d].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function connect() {
+    if (!window.ethereum) return setStatus("MetaMask not found. Install it and reload.", true);
+    try {
+      await window.ethereum.request({ method: "eth_requestAccounts" });
+      try {
+        await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: SEPOLIA_CHAIN_ID }] });
+      } catch (e) { return setStatus("Switch MetaMask to the Sepolia network and try again.", true); }
+      const signer = await new ethers.BrowserProvider(window.ethereum).getSigner();
+      account = await signer.getAddress();
+      writer = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+      $("connectBtn").textContent = short(account);
+      $("regBtn").disabled = !regHash;
+      setStatus("Connected.");
+      await loadRecords();
+    } catch (e) { setStatus(e.shortMessage || e.message, true); }
+  }
+
+  $("regFile").addEventListener("change", async (ev) => {
+    const f = ev.target.files[0]; if (!f) return;
+    regFileName = f.name; $("regName").textContent = f.name;
+    regHash = await sha256(f); $("regHash").textContent = regHash;
+    $("regBtn").disabled = !writer;
+    if (!writer) setStatus("Connect your wallet to register.");
+  });
+
+  $("verFile").addEventListener("change", async (ev) => {
+    const f = ev.target.files[0]; if (!f) return;
+    $("verName").textContent = f.name;
+    const h = await sha256(f); $("verHash").textContent = h;
+    const box = $("verResult"); box.className = "result"; box.textContent = "Checking...";
+    try {
+      const r = await reader.verify(h);
+      box.innerHTML = "";
+      const strong = document.createElement("strong"), p = document.createElement("div");
+      if (r.exists && !r.revoked) {
+        box.className = "result ok"; strong.textContent = "Verified";
+        p.textContent = `Registered by ${short(r.owner)} on ${when(r.timestamp)}` + (r.title ? ` as "${r.title}".` : ".") + " This exact file existed at that time.";
+      } else if (r.exists) {
+        box.className = "result bad"; strong.textContent = "Revoked";
+        p.textContent = `Registered on ${when(r.timestamp)}, but its owner has revoked it.`;
+      } else {
+        box.className = "result bad"; strong.textContent = "No record found";
+        p.textContent = "This file was never registered, or it has been changed since it was.";
+      }
+      box.append(strong, p);
+    } catch (e) { box.className = "result bad"; box.textContent = "Could not reach the contract. Check the contract address."; }
+  });
+
+  $("regBtn").addEventListener("click", async () => {
+    $("regBtn").disabled = true;
+    try {
+      setStatus("Confirm the transaction in MetaMask...");
+      const tx = await writer.register(regHash, $("title").value.trim() || regFileName);
+      setStatus("Recording on the blockchain...");
+      await tx.wait();
+      setStatus("Registered. Anyone can now verify this file.");
+      $("title").value = "";
+      await loadRecords();
+    } catch (e) { setStatus(e.shortMessage || e.message, true); }
+    finally { $("regBtn").disabled = false; }
+  });
+
+  async function loadRecords() {
+    try {
+      const recs = await writer.getRecordsOf(account);
+      const list = $("list"); list.innerHTML = "";
+      if (!recs.length) { list.innerHTML = '<p class="empty">Nothing registered yet.</p>'; return; }
+      [...recs].reverse().forEach((r) => {
+        const row = document.createElement("div"); row.className = "rec";
+        const left = document.createElement("div");
+        const t = document.createElement("div"); t.className = "t"; t.textContent = r.title || "Untitled";
+        const s = document.createElement("small"); s.textContent = `${when(r.timestamp)}  ${r.hash.slice(0, 10)}...${r.hash.slice(-6)}`;
+        left.append(t, s); row.appendChild(left);
+        if (r.revoked) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "Revoked"; row.appendChild(b); }
+        else {
+          const b = document.createElement("button"); b.className = "small"; b.textContent = "Revoke";
+          b.addEventListener("click", async () => {
+            b.disabled = true;
+            try { setStatus("Confirm the transaction in MetaMask..."); await (await writer.revoke(r.hash)).wait(); setStatus("Revoked."); await loadRecords(); }
+            catch (e) { setStatus(e.shortMessage || e.message, true); b.disabled = false; }
+          });
+          row.appendChild(b);
+        }
+        list.appendChild(row);
+      });
+    } catch (e) { setStatus("Could not load your records. Check the contract address.", true); }
+  }
+
+  $("connectBtn").addEventListener("click", connect);
+  if (window.ethereum) window.ethereum.on("chainChanged", () => location.reload());
+</script>
+</body>
+</html>
